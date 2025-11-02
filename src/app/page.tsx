@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { CheckCircle, XCircle, Wifi } from 'lucide-react';
+import AuthButton from '@/components/AuthButton';
 
 interface LinkStatus {
   url: string;
@@ -317,6 +318,7 @@ export default function Home() {
             <h1 className="text-2xl font-bold text-gray-900">
               Check Link - qlam
             </h1>
+            <AuthButton />
           </div>
         </div>
       </header>
