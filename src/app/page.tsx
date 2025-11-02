@@ -1,49 +1,35 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
-import { CheckCircle, XCircle, Wifi } from 'lucide-react';
+import { useReducer, useRef, useEffect, useCallback } from 'react';
+import { Save, Download } from 'lucide-react';
+import { useSession } from 'next-auth/react';
 import AuthButton from '@/components/AuthButton';
-
-interface LinkStatus {
-  url: string;
-  status: 'idle' | 'checking' | 'working' | 'failed';
-  error?: string;
-  startIndex: number;
-  endIndex: number;
-}
+import { LinkStatus } from '@/types/app';
+import { appReducer, initialState } from '@/reducers/appReducer';
+import { extractUrls, isUrlInProgress, getUrlStatus } from '@/utils/linkUtils';
+import { applyHighlighting } from '@/utils/editorUtils';
+import { useGistOperations } from '@/hooks/useGistOperations';
 
 export default function Home() {
-  const [content, setContent] = useState('');
-  const [linkStatuses, setLinkStatuses] = useState<LinkStatus[]>([]);
-  const [isChecking, setIsChecking] = useState(false);
+  const [state, dispatch] = useReducer(appReducer, initialState);
   const editorRef = useRef<HTMLDivElement>(null);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const { data: session, status: sessionStatus } = useSession();
 
-  // URL regex pattern - more robust
-  const urlRegex = /https?:\/\/[^\s<>"']+/g;
+  // Destructure state for easier access
+  const { content, linkStatuses, isChecking, isSaving, isLoading, gistMessage, hasLoadedGist } = state;
 
-  // Extract URLs from content
-  const extractUrls = (text: string): string[] => {
-    const matches = text.match(urlRegex);
-    return matches || [];
-  };
-
-  // Check if URL is already being checked or has been checked
-  const isUrlInProgress = (url: string) => {
-    return linkStatuses.some(status => status.url === url && status.status === 'checking');
-  };
-
-  // Check if URL has been checked
-  const getUrlStatus = (url: string) => {
-    return linkStatuses.find(status => status.url === url);
-  };
+  // Create a memoized version of applyHighlighting that uses current state
+  const applyHighlightingWithState = useCallback(() => {
+    applyHighlighting(editorRef, linkStatuses);
+  }, [linkStatuses]);
 
   // Check a single link
-  const checkLink = async (url: string) => {
+  const checkLink = useCallback(async (url: string) => {
     console.log('checkLink called for:', url);
     
     // Don't check if already in progress
-    if (isUrlInProgress(url)) {
+    if (isUrlInProgress(url, linkStatuses)) {
       console.log('URL already in progress:', url);
       return;
     }
@@ -58,7 +44,7 @@ export default function Home() {
       endIndex: content.indexOf(url) + url.length
     };
 
-    setLinkStatuses(prev => [...prev.filter(s => s.url !== url), newStatus]);
+    dispatch({ type: 'ADD_LINK_STATUS', payload: newStatus });
 
     try {
       console.log('Making API call for:', url);
@@ -73,30 +59,24 @@ export default function Home() {
       const result = await response.json();
       console.log('API result for', url, ':', result);
       
-      setLinkStatuses(prev => 
-        prev.map(status => 
-          status.url === url 
-            ? { ...status, status: result.status, error: result.error }
-            : status
-        )
-      );
+      dispatch({ 
+        type: 'UPDATE_LINK_STATUS', 
+        payload: { url, status: result.status, error: result.error } 
+      });
     } catch (error) {
-      setLinkStatuses(prev => 
-        prev.map(status => 
-          status.url === url 
-            ? { ...status, status: 'failed', error: 'Network error' }
-            : status
-        )
-      );
+      dispatch({ 
+        type: 'UPDATE_LINK_STATUS', 
+        payload: { url, status: 'failed', error: 'Network error' } 
+      });
     }
-  };
+  }, [content, linkStatuses]);
 
   // Check all links in content
   const checkAllLinks = async () => {
     const urls = extractUrls(content);
     if (urls.length === 0) return;
 
-    setIsChecking(true);
+    dispatch({ type: 'SET_IS_CHECKING', payload: true });
     
     for (const url of urls) {
       await checkLink(url);
@@ -104,11 +84,11 @@ export default function Home() {
       await new Promise(resolve => setTimeout(resolve, 300));
     }
     
-    setIsChecking(false);
+    dispatch({ type: 'SET_IS_CHECKING', payload: false });
   };
 
   // Debounced link checking function
-  const debouncedCheckLinks = (newContent: string) => {
+  const debouncedCheckLinks = useCallback((newContent: string) => {
     // Clear existing timer
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
@@ -120,7 +100,7 @@ export default function Home() {
       console.log('Found URLs:', urls);
       
       urls.forEach(url => {
-        const existingStatus = getUrlStatus(url);
+        const existingStatus = getUrlStatus(url, linkStatuses);
         console.log('URL:', url, 'existing status:', existingStatus);
         if (!existingStatus) {
           // New URL found, check it
@@ -129,12 +109,12 @@ export default function Home() {
         }
       });
     }, 2000); // 2000ms debounce delay
-  };
+  }, [linkStatuses, checkLink]);
 
   // Handle content changes
   const handleContentChange = (newContent: string) => {
     console.log('Content changed:', newContent);
-    setContent(newContent);
+    dispatch({ type: 'SET_CONTENT', payload: newContent });
     
     // Debounce link checking
     debouncedCheckLinks(newContent);
@@ -174,7 +154,7 @@ export default function Home() {
       // Update content state
       if (editorRef.current) {
         const newContent = editorRef.current.innerText;
-        setContent(newContent);
+        dispatch({ type: 'SET_CONTENT', payload: newContent });
         
         // Debounce link checking
         debouncedCheckLinks(newContent);
@@ -182,123 +162,33 @@ export default function Home() {
     }
   };
 
-  // Get status icon
-  const getStatusIcon = (url: string) => {
-    const status = getUrlStatus(url);
-    
-    if (!status) {
-      return <Wifi className="w-4 h-4 text-gray-400 inline ml-1" />;
-    }
-    
-    switch (status.status) {
-      case 'working':
-        return <CheckCircle className="w-4 h-4 text-green-500 inline ml-1" />;
-      case 'failed':
-        return <XCircle className="w-4 h-4 text-red-500 inline ml-1" />;
-      case 'checking':
-        return <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin inline ml-1" />;
-      default:
-        return <Wifi className="w-4 h-4 text-gray-400 inline ml-1" />;
-    }
-  };
 
-  // Apply highlighting to the editor content
-  const applyHighlighting = () => {
-    if (!editorRef.current) return;
-    
-    // Get the current selection to preserve cursor position
-    const selection = window.getSelection();
-    let savedRange: Range | null = null;
-    if (selection && selection.rangeCount > 0) {
-      savedRange = selection.getRangeAt(0).cloneRange();
-    }
-    
-    // Get the text content
-    const textContent = editorRef.current.innerText;
-    
-    // Clear the editor
-    editorRef.current.innerHTML = '';
-    
-    // Split content by newlines to preserve line breaks
-    const lines = textContent.split('\n');
-    
-    lines.forEach((line, lineIndex) => {
-      // Process each line for URL highlighting
-      const urls = extractUrls(line);
-      let lastIndex = 0;
-      
-      // Create a document fragment to build the line
-      const fragment = document.createDocumentFragment();
-      
-      urls.forEach(url => {
-        // Find URL position within the current line
-        const urlIndex = line.indexOf(url, lastIndex);
-        if (urlIndex > lastIndex) {
-          fragment.appendChild(document.createTextNode(line.slice(lastIndex, urlIndex)));
-        }
-        
-        const status = getUrlStatus(url);
-        let highlightClass = 'bg-gray-100 text-gray-800'; // Default gray
-        
-        if (status) {
-          switch (status.status) {
-            case 'working':
-              highlightClass = 'bg-green-100 text-green-800 border border-green-200';
-              break;
-            case 'failed':
-              highlightClass = 'bg-red-100 text-red-800 border border-red-200';
-              break;
-            case 'checking':
-              highlightClass = 'bg-blue-100 text-blue-800 border border-blue-200';
-              break;
-          }
-        }
-        
-        // Create span for the URL with highlighting
-        const span = document.createElement('span');
-        span.className = `inline-block px-1 py-0.5 rounded font-medium ${highlightClass} cursor-pointer hover:opacity-80 transition-opacity`;
-        span.textContent = url;
-        span.addEventListener('click', () => {
-          window.open(url, '_blank', 'noopener,noreferrer');
-        });
-        span.title = `Click to open ${url}`;
-        
-        fragment.appendChild(span);
-        
-        lastIndex = urlIndex + url.length;
-      });
-      
-      if (lastIndex < line.length) {
-        fragment.appendChild(document.createTextNode(line.slice(lastIndex)));
-      }
-      
-      // Add the processed line to the editor
-      if (editorRef.current) {
-        editorRef.current.appendChild(fragment);
-      }
-      
-      // Add line break if not the last line
-      if (lineIndex < lines.length - 1 && editorRef.current) {
-        editorRef.current.appendChild(document.createElement('br'));
-      }
-    });
-    
-    // Restore cursor position if we had one
-    if (savedRange && selection) {
-      try {
-        selection.removeAllRanges();
-        selection.addRange(savedRange);
-      } catch (e) {
-        // Ignore errors in restoring selection
-      }
-    }
-  };
+  // Use Gist operations hook
+  const { handleSaveGist, handleLoadGist } = useGistOperations({
+    dispatch,
+    content,
+    editorRef,
+    applyHighlighting: applyHighlightingWithState,
+  });
 
   // Effect to apply highlighting when link statuses change
   useEffect(() => {
-    applyHighlighting();
+    applyHighlightingWithState();
+  }, [applyHighlightingWithState]);
+
+  // Auto-load gist when user logs in
+  useEffect(() => {
+    if (sessionStatus === 'authenticated' && session && !hasLoadedGist) {
+      handleLoadGist();
+      dispatch({ type: 'SET_HAS_LOADED_GIST', payload: true });
+    }
+    
+    // Reset hasLoadedGist when user signs out
+    if (sessionStatus === 'unauthenticated') {
+      dispatch({ type: 'RESET_GIST_STATE' });
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [linkStatuses]);
+  }, [sessionStatus, session]);
 
   // Cleanup debounce timer on unmount
   useEffect(() => {
@@ -316,7 +206,7 @@ export default function Home() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16">
             <h1 className="text-2xl font-bold text-gray-900">
-              Check Link - qlam
+              Note Links - qlam
             </h1>
             <AuthButton />
           </div>
@@ -333,6 +223,44 @@ export default function Home() {
                 Link Status Checker
               </h2>
               <div className="flex gap-2">
+                {session && (
+                  <>
+                    <button
+                      onClick={handleSaveGist}
+                      disabled={isSaving || !session}
+                      className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isSaving ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />
+                          Saving...
+                        </>
+                      ) : (
+                        <>
+                          <Save className="w-4 h-4 mr-2" />
+                          Save Note
+                        </>
+                      )}
+                    </button>
+                    <button
+                      onClick={handleLoadGist}
+                      disabled={isLoading || !session}
+                      className="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isLoading ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-gray-700 border-t-transparent rounded-full animate-spin mr-2" />
+                          Loading...
+                        </>
+                      ) : (
+                        <>
+                          <Download className="w-4 h-4 mr-2" />
+                          Load Note
+                        </>
+                      )}
+                    </button>
+                  </>
+                )}
                 <button
                   onClick={checkAllLinks}
                   disabled={isChecking || extractUrls(content).length === 0}
@@ -347,18 +275,17 @@ export default function Home() {
                     'Check All Links'
                   )}
                 </button>
-                <button
-                  onClick={() => {
-                    console.log('Current content:', content);
-                    console.log('Current link statuses:', linkStatuses);
-                    console.log('Extracted URLs:', extractUrls(content));
-                  }}
-                  className="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                >
-                  Debug
-                </button>
               </div>
             </div>
+            {gistMessage && (
+              <div className={`mt-3 px-4 py-2 rounded-md text-sm ${
+                gistMessage.type === 'success' 
+                  ? 'bg-green-50 text-green-800 border border-green-200' 
+                  : 'bg-red-50 text-red-800 border border-red-200'
+              }`}>
+                {gistMessage.text}
+              </div>
+            )}
           </div>
 
           {/* Text Editor */}
@@ -390,6 +317,14 @@ export default function Home() {
                 <li>• <span className="bg-gray-100 text-gray-800 px-1 py-0.5 rounded text-xs">Gray highlight</span> = Not checked</li>
                 <li>• Click on any highlighted link to open it in a new tab</li>
                 <li>• Use &quot;Check All Links&quot; to recheck all links</li>
+                {session && (
+                  <>
+                    <li>• Sign in with GitHub to save your notes to a private Gist</li>
+                    <li>• Use &quot;Save Note&quot; to save your content to GitHub Gist</li>
+                    <li>• Use &quot;Load Note&quot; to load your saved content (auto-loads on login)</li>
+                    <li>• Each user has one dedicated Gist for note storage</li>
+                  </>
+                )}
               </ul>
             </div>
           </div>
